@@ -1,0 +1,255 @@
+//Client.cpp kodu
+
+//Libraries
+#include <iostream>
+#include <thread>
+#include <pthread.h>
+#include <vector>
+#include <unordered_map>
+#include <mutex>
+#include <functional>
+#include <algorithm>
+#include <fstream>
+#include <sstream>
+#include <sys/types.h>
+#include <unistd.h>
+#include <sys/stat.h>
+
+// Socket API headers
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+
+using namespace std;
+
+// Constants
+const int PORT = 12345; // Port number
+const int BUFFER_SIZE = 1024; // Buffer size
+bool first_CONN = true;
+
+// Function prototypes
+void ReceiveChat(int sockfd); // Function to service client
+unsigned long checksum(string message); // Function to calculate checksum of a message
+unsigned long crc(string message); // Function to calculate cyclic redundancy check (CRC) of a message
+string current_date_time(); // Function to get current date and time
+vector <string> split(const string & str, char delimiter); // Function to split string by delimiter character
+
+int main() {
+  // Create socket
+  int sockfd = socket(AF_INET, SOCK_STREAM, 0);
+  if (sockfd < 0) { // Check if socket was created successfully
+    cerr << "Error creating socket" << endl;
+    return 1;
+  }
+
+  // Connect to server
+  sockaddr_in addr; // Address of server
+  addr.sin_family = AF_INET; // IPv4
+  addr.sin_port = htons(PORT); // Port number
+  if (inet_pton(AF_INET, "127.0.0.1", & addr.sin_addr) <= 0) { // Convert IP address to binary
+    cerr << "Error converting address" << endl;
+    return 1;
+  }
+
+  if (connect(sockfd, (sockaddr * ) & addr, sizeof(addr)) < 0) { // Connect to server
+    cerr << "Error connecting to server" << endl;
+    return 1;
+  }
+
+  cout << "Connected to server" << endl;
+
+  // Get chat name from user
+  string name;
+  cout << "Enter chat name: ";
+  getline(cin, name);
+  cout << endl << "Welcome to the chat, " << name << "!" << endl;
+
+  // Create log directory
+  string log_directory = "logs"; // Directory name
+  mkdir(log_directory.c_str(), 0777); // Create directory
+
+  // Create log file
+  string log_filename = log_directory + "/" + current_date_time() + "-" + name + ".txt"; // Log file name
+  ofstream log_file(log_filename); // Create log file
+  if (!log_file.is_open()) { // Check if log file was created successfully
+    cerr << "Error creating log file" << endl;
+  }
+
+  // Send CONN command to server to connect
+  string conn_message = "CONN|" + name; // Create CONN message
+  send(sockfd, conn_message.c_str(), conn_message.size(), 0); // Send CONN message
+
+  // Start receiving messages in separate thread
+  thread receive_thread(ReceiveChat, sockfd);
+
+  // Read messages from user and send to server
+  string message; // Message from user
+  while (true) {
+    getline(cin, message); // Read message from user
+
+    // Check if user wants to quit
+    if (message == "GONE") {
+      break;
+    }
+
+    // Split message by "|" to get recipient and message text
+    vector <string> parts = split(message, '|'); // Split message by delimiter
+    if (parts.size() < 3 || parts.size() > 3 || parts[1].empty() || parts[2].empty() || parts[3].empty()) { // Check if message is in correct format
+      cerr << "Invalid message format: Recipient Name|Message|Recipient Sockfd" << endl;
+      continue;
+    }
+
+    string recipient_name = parts[0]; // Get recipient name
+    //cout << "recipient_name: " << recipient_name << endl; // Print recipient name
+    string message_text = parts[1]; // Get message text
+    //cout << "message_text: " << message_text << endl; // Print message text
+    string recipient_sockfd = parts[2]; // Get message text
+    //cout << "recipient_sockfd: " << recipient_sockfd << endl; // Print recipient sockfd
+
+    // Calculate checksum and CRC of message
+    unsigned long checksum_value = checksum(message_text); // Calculate checksum
+    unsigned long crc_value = crc(message_text); // Calculate CRC
+
+    // Generate unique message ID
+    string message_id = to_string(getpid()) + "-" + current_date_time();
+
+    // Send MESG command to server with recipient, message text, checksum, CRC, and message ID
+    string mesg_message = "MESG|" + to_string(checksum_value) + "|" + to_string(crc_value) + "|" + recipient_name + "|" + message_text + "|" + message_id + "|" + recipient_sockfd; // Create MESG message
+    send(sockfd, mesg_message.c_str(), mesg_message.size(), 0); // Send MESG message
+
+    // Write received and sent messages.
+    log_file << current_date_time() << " " << name << "->" << recipient_name << ": " << message_text << endl;
+  }
+
+  // Send GONE command to server to disconnect
+  string gone_message = "GONE|" + name; // Create GONE message
+  send(sockfd, gone_message.c_str(), gone_message.size(), 0); // Send GONE message
+
+  // Wait for receive thread to finish
+  receive_thread.join();
+
+  // Close socket and log file
+  close(sockfd);
+  log_file.close();
+
+  return 0;
+}
+
+// Function to receive messages from server
+void ReceiveChat(int sockfd) {
+  char buffer[BUFFER_SIZE]; // Buffer to store message
+  int bytes_received; // Number of bytes received
+
+  while (true) {
+    // Wait for message from server
+    bytes_received = recv(sockfd, buffer, BUFFER_SIZE, 0); // Receive message
+    if (bytes_received <= 0) {
+      cerr << "See you later..:)" << endl;
+      break;
+    }
+
+    string message(buffer, bytes_received); // Convert message to string
+    vector <string> parts = split(message, '|'); // Split message by delimiter
+
+    if (parts[0] == "MESG") { // Check if message is a MESG command
+      // Check checksum and CRC of message
+      unsigned long checksum_value = stoul(parts[1]); // Convert checksum to unsigned long
+      //cout << "checksum" << checksum_value << endl; //Test if checksum is correct
+      unsigned long crc_value = stoul(parts[2]); // Convert CRC to unsigned long
+      //cout << "crc" << crc_value << endl; //Test if crc is correct
+
+      if (checksum(parts[4]) != checksum_value || crc(parts[4]) != crc_value) { // Check if checksum and CRC are correct for message text (parts[3])
+        // Send MERR command to server to re-send last message
+        string merr_message = "MERR|" + parts[3] + "|" + parts[4] + "|" + parts[5] + "|" + parts[6]; // Create MERR message
+        send(sockfd, merr_message.c_str(), merr_message.size(), 0); // Send MERR message
+      } else {
+        // Display message
+        string sender_name = parts[3]; // Get sender name
+        string message_text = parts[4]; // Get message text
+        cout << sender_name << " -> " << message_text << endl;
+      }
+    } else if (parts[0] == "CONN") { // Check if message is a CONN command
+      // Add new client to list
+      int num_clients = parts.size() - 1; // Get number of clients
+      
+      string new_client_name = parts[num_clients]; // Get client name
+      cout << new_client_name << " connected to the server. " << endl;
+      
+    } else if (parts[0] == "CLIST") { // Check if message is a CLIST command
+      // Update client list
+        if(first_CONN){
+          first_CONN=false;
+          // Update client list
+          int num_clients = parts.size() - 1; // Get number of clients
+          if(num_clients==1)
+            cout << "No other clients connected to the server." << endl;
+          else{
+            cout << "Active clients: ";
+            for (int i = 1; i <= num_clients; i++) {
+              cout << "*" <<parts[i] << " ";
+            }
+          cout << endl;
+        }
+      }
+    } else if (parts[0] == "GONE") { // Check if message is a GONE command
+      // Remove client from list
+      string gone_client_name = parts[1]; // Get client name
+      cout << "Client disconnected: " << gone_client_name << endl;
+    } else if (parts[0] == "MERR") { // Check if message is a MERR command
+      // Resend last message
+      string sender_name = parts[1]; // Get recipient name
+      string message_text = parts[2]; // Get message text
+
+      cout << sender_name << " -> " << message_text << endl;
+
+    } else {
+      cerr << "Invalid command: " << parts[0] << endl;
+    }
+  }
+}
+
+// Function to get current date and time as a string
+string current_date_time() {
+  time_t now = time(0); // Get current time
+  tm tstruct;
+  char buf[80]; // Buffer to store time
+  tstruct = * localtime( & now); // Convert to local time
+  strftime(buf, sizeof(buf), "%Y-%m-%d.%X", & tstruct); // Format time
+  return buf;
+}
+
+// Function to split string by delimiter character
+vector <string> split(const string & str, char delimiter) {
+  vector < string > parts;
+  string part;
+  istringstream stream(str);
+  while (getline(stream, part, delimiter)) {
+    parts.push_back(part);
+  }
+
+  return parts;
+}
+
+// Function to calculate checksum of a message
+unsigned long checksum(string message) {
+  unsigned long sum = 0;
+
+  // Iterate over each character in the message
+  for (char c: message) { 
+    sum += c; // Add ASCII value of character to sum
+  }
+  return sum;
+}
+
+// Function to calculate cyclic redundancy check (CRC) of a message
+unsigned long crc(string message) {
+  unsigned long crc = 0;
+
+  // Iterate over each character in the message
+  for (char c: message) {
+    // XOR the character's ASCII value with the current CRC value
+    crc ^= c; // XOR operation
+  }
+
+  return crc;
+}
