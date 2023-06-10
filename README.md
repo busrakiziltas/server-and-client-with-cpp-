@@ -1,4 +1,4 @@
-# c-serverandclient
+# -serverandclient
 In this project, required to implement a multi-threaded chat room service. The system will have one (multi-threaded) chat server, and multiple chat clients. Socket interface is used to implement network communications. The C/C++ chat application you are going to build is a console application that is launched from the command line using TCP connection. 
 There can be multiple clients connect to a server and they can chat to each other. Only two users who are messaging can see each other’s message and other users cannot see these messages. It is a private chat between two users.
 The application consists of two parts: Server and Client. Each part can run independently on separate computers.
