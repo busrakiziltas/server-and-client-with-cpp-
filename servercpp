@@ -1,0 +1,290 @@
+//Server.cpp kodu
+
+//Libraries
+#include <iostream>
+#include <thread>
+#include <pthread.h>
+#include <vector>
+#include <unordered_map>
+#include <mutex>
+#include <functional>
+#include <algorithm>
+#include <fstream>
+#include <sstream>
+#include <sys/types.h>
+#include <unistd.h>
+#include <sys/stat.h>
+
+// Socket API headers
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+
+using namespace std;
+
+// Constants
+const int PORT = 12345; // Port number
+const int BUFFER_SIZE = 1024; // Buffer size
+string client_list_message = "CLIST|"; // Message to send to client with list of clients
+
+// Client info structure
+struct Client {
+  string name; // Client name
+  int sockfd; // Socket file descriptor
+  sockaddr_in addr; // Client address
+};
+
+bool operator == (const Client & lhs,
+  const Client & rhs) { // Operator overloading
+  return lhs.sockfd == rhs.sockfd && lhs.name == rhs.name;
+}
+
+// Global variables
+vector < Client > clients; // List of clients
+mutex client_list_mutex; // Mutex for client list
+
+
+// Function prototypes
+void ServiceClient(Client client); // Function to service client
+unsigned long checksum(string message); // Function to calculate checksum of a message
+unsigned long crc(string message); // Function to calculate cyclic redundancy check (CRC) of a message
+string current_date_time(); // Function to get current date and time
+vector <string> split(const string & str, char delimiter); // Function to split string by delimiter character
+
+int main() {
+  // Create socket
+  int sockfd = socket(AF_INET, SOCK_STREAM, 0); // Create socket
+  if (sockfd < 0) { // Check for error
+    cerr << "Error creating socket" << endl;
+    return 1;
+  }
+
+  // Bind socket to address
+  sockaddr_in addr; // Socket address
+  addr.sin_family = AF_INET; // IPv4
+  addr.sin_port = htons(PORT); // Port number
+  addr.sin_addr.s_addr = INADDR_ANY; // Any address
+  if (bind(sockfd, (sockaddr * ) & addr, sizeof(addr)) < 0) { // Bind socket
+    cerr << "Error binding socket" << endl;
+    return 1;
+  }
+  cout << endl << "Server has been activated!" << endl;
+  // server info: ip, port, sockfd vb.
+  cout << "Server Port: " << PORT << " " << "Socket File Descriptor: " << sockfd << endl;
+  cout << "Requests listening..." << endl;
+
+  // Listen for connections
+  listen(sockfd, 10);
+
+  while (true) { // Loop to accept connections
+    // Accept incoming connection
+    sockaddr_in client_addr; // Client address
+    socklen_t client_addr_len = sizeof(client_addr); // Client address length
+    int client_sockfd = accept(sockfd, (sockaddr * ) & client_addr, & client_addr_len); // Accept connection
+    if (client_sockfd < 0) { // Check for error
+      cerr << "Error accepting connection" << endl;
+      continue;
+    }
+
+    // Create client info structure
+    Client client; // Client info structure
+    client.sockfd = client_sockfd; // Socket file descriptor
+    client.addr = client_addr; // Client address
+
+    // Add client to list
+    client_list_mutex.lock(); // Lock client list
+    clients.push_back(client); // Add client to list
+    client_list_mutex.unlock(); // Unlock client list
+
+    // Start thread to service client
+    thread t(ServiceClient, client); // Create thread
+    t.detach(); // Detach thread
+  }
+
+  // Close socket
+  close(sockfd);
+
+  return 0;
+}
+
+
+void ServiceClient(Client client) { // Function to service client
+  char buffer[BUFFER_SIZE]; // Buffer to hold message
+  int bytes_received; // Number of bytes received
+
+
+  while (true) {
+    // Wait for message from client
+    bytes_received = recv(client.sockfd, buffer, BUFFER_SIZE, 0); // Receive message
+    if (bytes_received <= 0) { // Check for error
+      break;
+    }
+
+
+
+    string message(buffer, bytes_received); // Convert message to string
+    vector < string > parts = split(message, '|'); // Split message by delimiter
+
+    if (parts[0] == "CONN") { // Check for CONN command
+      // Set client name
+      client.name = parts[1];
+
+      // Send CONN command to all clients
+      for (Client c: clients) { // Loop through clients
+        if (c.sockfd != client.sockfd) { // Check if client is not the same as the new client
+          string conn_message = "CONN|" + client.name; // Create CONN message
+          send(c.sockfd, conn_message.c_str(), conn_message.size(), 0); // Send CONN message
+        }
+      }
+      
+      //new client ip, sockfd and date cout
+      cout << "New client connected: " << client.name << " " << inet_ntoa(client.addr.sin_addr) << " " << client.sockfd << " " << current_date_time() << endl;
+
+      client_list_message += client.name + "|"; // Add client name to client list message
+      
+      for (Client c: clients) { // Loop through clients
+        if (c.sockfd == client.sockfd) { // Check if client is not the same as the new client
+        // Send CLIST command to new client
+        send(client.sockfd, client_list_message.c_str(), client_list_message.size(), 0); // Send CLIST message
+      }
+      }
+      
+    } else if (parts[0] == "MESG") { // Check for MESG command
+      // Extract message details
+      //cout << "Test, Server MESG'e girdi" << endl; // Test message
+      unsigned long checksum_value = stoul(parts[1]); // Checksum value
+      unsigned long crc_value = stoul(parts[2]); // CRC value
+      string recipient_name = parts[3]; // Recipient name 
+      //cout << "Test " << recipient_name << endl; // test name
+      string message_text = parts[4]; // Message text
+      string message_id = parts[5]; // Message ID
+      int recipient_sockfd = stoul(parts[6]);
+      string recipient_sockfd_string = parts[6];
+
+      // Validate message using checksum and CRC
+      bool valid_message = true; // Flag to indicate if message is valid
+      if (checksum(message_text) != checksum_value) { // Check if checksum is valid
+        valid_message = false; // Set flag to false
+        cout<<"Checksum is not valid"<<endl;
+      }
+      if (crc(message_text) != crc_value) { // Check if CRC is valid
+        valid_message = false; // Set flag to false
+        cout<<"CRC is not valid"<<endl;
+      }
+
+      // Find recipient
+      Client recipient; // Recipient
+      bool recipient_found = false; // Flag to indicate if recipient was found
+      for (Client c: clients) { // Loop through clients
+        if (c.sockfd == recipient_sockfd) { // Check if client name matches recipient name
+          recipient = c; // Set recipient
+          recipient_found = true; // Set flag to true
+          //cout << "Recipient found: " << recipient_name << endl;  // Test print
+          break;
+        }
+      }
+
+      if (recipient_found) { // Check if recipient was found
+        if (valid_message) { // Check if message is valid
+          //cout << "Message is valid" << endl; // Test print
+          // Send message to recipient
+          string mesg_message = "MESG|" + to_string(checksum_value) + "|" + to_string(crc_value) + "|" + client.name + "|" + message_text + "|" + message_id + "|" + recipient_sockfd_string; // Create MESG message
+          send(recipient.sockfd, mesg_message.c_str(), mesg_message.size(), 0); // Send MESG message
+        } else {
+          //cout << "Message is not valid" << endl; // Test print
+          // Send MERR command to recipient
+          string merr_message = "MERR|" + client.name + "|" + message_id; // Create MERR message
+          send(recipient.sockfd, merr_message.c_str(), merr_message.size(), 0); // Send MERR message
+        }
+      } else {
+        // Recipient not found
+        cerr << "Recipient not found: " << recipient_name << endl;
+      }
+    } else if (parts[0] == "MERR") { // Check for MESG command
+      string recipient_name = parts[1]; // Recipient name 
+      string message_text = parts[2]; // Message text
+      string message_id = parts[3]; // Message ID
+      int recipient_sockfd = stoul(parts[4]);
+
+      // Find recipient
+      Client recipient; // Recipient
+      bool recipient_found = false; // Flag to indicate if recipient was found
+      for (Client c: clients) { // Loop through clients
+        if (c.sockfd == recipient_sockfd) { // Check if client name matches recipient name
+          recipient = c; // Set recipient
+          recipient_found = true; // Set flag to true
+          //cout << "Recipient found: " << recipient_name << endl;  // Test print
+          break;
+        }
+      }
+      string merr_message = "MERR|" + client.name + "|" + message_text + "|" + message_id; // Create MESG message
+      send(recipient.sockfd, merr_message.c_str(), merr_message.size(), 0); // Send MESG message
+    } else if (parts[0] == "GONE") { // Check for GONE command
+      // Remove client from list 
+      client_list_mutex.lock(); // Lock client list
+      clients.erase(remove(clients.begin(), clients.end(), client), clients.end()); // Remove client from list
+      client_list_mutex.unlock(); // Unlock client list
+
+      // client left cout
+      cout << "Client left: " << client.name << " - " << current_date_time() << endl;
+
+      // Send GONE command to all clients
+      for (Client c: clients) { // Loop through clients
+        string gone_message = "GONE|" + client.name; // Create GONE message
+        send(c.sockfd, gone_message.c_str(), gone_message.size(), 0); // Send GONE message
+      }
+
+      break;
+    } else {
+      cerr << "Invalid command: " << parts[0] << endl; // Print error message
+    }
+  }
+
+  // Close socket
+  close(client.sockfd);
+}
+
+unsigned long checksum(string message) { // Function to calculate checksum
+  unsigned long checksum = 0; // Checksum value
+
+  // Iterate over each character in the message
+  for (char c: message) { // Loop through characters
+    // Add the character's ASCII value to the checksum
+    checksum += c;
+  }
+
+  return checksum;
+}
+
+unsigned long crc(string message) { // Function to calculate CRC
+  unsigned long crc = 0; // CRC value
+
+  // Iterate over each character in the message
+  for (char c: message) { // Loop through characters
+    // XOR the character's ASCII value with the current CRC value
+    crc ^= c;
+  }
+
+  return crc;
+}
+
+vector <string> split(const string & str, char delimiter) { // Function to split string by delimiter character
+  vector <string> parts; // Vector to hold parts of string
+  string part; // String to hold part of string
+  istringstream stream(str); // String stream
+  while (getline(stream, part, delimiter)) { // Get part of string
+    parts.push_back(part); // Add part to vector
+  }
+
+  return parts;
+}
+
+// Function to get current date and time as a string
+string current_date_time() {
+  time_t now = time(0); // Get current time
+  tm tstruct;
+  char buf[80]; // Buffer to store time
+  tstruct = * localtime( & now); // Convert to local time
+  strftime(buf, sizeof(buf), "%Y-%m-%d.%X", & tstruct); // Format time
+  return buf;
+}
